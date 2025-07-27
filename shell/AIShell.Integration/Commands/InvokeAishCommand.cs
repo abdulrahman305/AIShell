@@ -8,18 +8,56 @@ namespace AIShell.Integration.Commands;
 [Cmdlet(VerbsLifecycle.Invoke, "AIShell", DefaultParameterSetName = "Default")]
 public class InvokeAIShellCommand : PSCmdlet
 {
-    [Parameter(Mandatory = true, ValueFromRemainingArguments = true)]
+    private const string DefaultSet = "Default";
+    private const string ClipboardSet = "Clipboard";
+    private const string PostCodeSet = "PostCode";
+    private const string CopyCodeSet = "CopyCode";
+    private const string ExitSet = "Exit";
+
+    /// <summary>
+    /// Sets and gets the query to be sent to AIShell
+    /// </summary>
+    [Parameter(Position = 0, ParameterSetName = DefaultSet)]
+    [Parameter(Position = 0, ParameterSetName = ClipboardSet)]
     public string[] Query { get; set; }
 
-    [Parameter]
+    /// <summary>
+    /// Sets and gets the agent to use for the query.
+    /// </summary>
+    [Parameter(ParameterSetName = DefaultSet)]
+    [Parameter(ParameterSetName = ClipboardSet)]
     [ValidateNotNullOrEmpty]
     public string Agent { get; set; }
 
-    [Parameter(ParameterSetName = "Default", Mandatory = false, ValueFromPipeline = true)]
+    /// <summary>
+    /// Sets and gets the context information for the query.
+    /// </summary>
+    [Parameter(ValueFromPipeline = true, ParameterSetName = DefaultSet)]
     public PSObject Context { get; set; }
 
-    [Parameter(ParameterSetName = "Clipboard", Mandatory = true)]
+    /// <summary>
+    /// Indicates getting context information from clipboard.
+    /// </summary>
+    [Parameter(Mandatory = true, ParameterSetName = ClipboardSet)]
     public SwitchParameter ContextFromClipboard { get; set; }
+
+    /// <summary>
+    /// Indicates running '/code post' from the AIShell.
+    /// </summary>
+    [Parameter(ParameterSetName = PostCodeSet)]
+    public SwitchParameter PostCode { get; set; }
+
+    /// <summary>
+    /// Indicates running '/code copy' from the AIShell.
+    /// </summary>
+    [Parameter(ParameterSetName = CopyCodeSet)]
+    public SwitchParameter CopyCode { get; set; }
+
+    /// <summary>
+    /// Indicates running '/exit' from the AIShell.
+    /// </summary>
+    [Parameter(ParameterSetName = ExitSet)]
+    public SwitchParameter Exit { get; set; }
 
     private List<PSObject> _contextObjects;
 
@@ -36,25 +74,62 @@ public class InvokeAIShellCommand : PSCmdlet
 
     protected override void EndProcessing()
     {
-        Collection<string> results = null;
-        if (_contextObjects is not null)
+        string message, context = null;
+
+        switch (ParameterSetName)
         {
-            using PowerShell pwsh = PowerShell.Create(RunspaceMode.CurrentRunspace);
-            results = pwsh
-                .AddCommand("Out-String")
-                .AddParameter("InputObject", _contextObjects)
-                .Invoke<string>();
-        }
-        else if (ContextFromClipboard)
-        {
-            using PowerShell pwsh = PowerShell.Create(RunspaceMode.CurrentRunspace);
-            results = pwsh
-                .AddCommand("Get-Clipboard")
-                .AddParameter("Raw")
-                .Invoke<string>();
+            case PostCodeSet:
+                message = "/code post";
+                break;
+            case CopyCodeSet:
+                message = "/code copy";
+                break;
+            case ExitSet:
+                message = "/exit";
+                break;
+            default:
+                if (Query is not null)
+                {
+                    message = string.Join(' ', Query);
+                }
+                else
+                {
+                    Host.UI.Write("Query: ");
+                    message = Host.UI.ReadLine();
+                }
+
+                if (string.IsNullOrEmpty(message))
+                {
+                    ThrowTerminatingError(
+                        new ErrorRecord(
+                            new ArgumentException("A query message is required."),
+                            "QueryIsMissing",
+                            ErrorCategory.InvalidArgument,
+                            targetObject: null));
+                }
+
+                Collection<string> results = null;
+                if (_contextObjects is not null)
+                {
+                    using PowerShell pwsh = PowerShell.Create(RunspaceMode.CurrentRunspace);
+                    results = pwsh
+                        .AddCommand("Out-String")
+                        .AddParameter("InputObject", _contextObjects)
+                        .Invoke<string>();
+                }
+                else if (ContextFromClipboard)
+                {
+                    using PowerShell pwsh = PowerShell.Create(RunspaceMode.CurrentRunspace);
+                    results = pwsh
+                        .AddCommand("Get-Clipboard")
+                        .AddParameter("Raw")
+                        .Invoke<string>();
+                }
+
+                context = results?.Count > 0 ? results[0] : null;
+                break;
         }
 
-        string context = results?.Count > 0 ? results[0] : null;
-        Channel.Singleton.PostQuery(new PostQueryMessage(string.Join(' ', Query), context, Agent));
+        Channel.Singleton.PostQuery(new PostQueryMessage(message, context, Agent));
     }
 }

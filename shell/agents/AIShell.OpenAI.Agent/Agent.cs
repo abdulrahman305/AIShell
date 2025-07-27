@@ -1,8 +1,7 @@
-using System.ClientModel;
 using System.Text;
 using System.Text.Json;
 using AIShell.Abstraction;
-using OpenAI.Chat;
+using Microsoft.Extensions.AI;
 
 namespace AIShell.OpenAI.Agent;
 
@@ -84,7 +83,7 @@ public sealed class OpenAIAgent : ILLMAgent
     public bool CanAcceptFeedback(UserAction action) => false;
 
     /// <inheritdoc/>
-    public void OnUserAction(UserActionPayload actionPayload) {}
+    public void OnUserAction(UserActionPayload actionPayload) { }
 
     /// <inheritdoc/>
     public Task RefreshChatAsync(IShell shell, bool force)
@@ -116,42 +115,86 @@ public sealed class OpenAIAgent : ILLMAgent
             return checkPass;
         }
 
-        IAsyncEnumerator<StreamingChatCompletionUpdate> response = await host
+        IAsyncEnumerator<ChatResponseUpdate> response = await host
             .RunWithSpinnerAsync(
-                () => _chatService.GetStreamingChatResponseAsync(input, token)
+                () => _chatService.GetStreamingChatResponseAsync(input, shell, token)
             ).ConfigureAwait(false);
 
         if (response is not null)
         {
-            StreamingChatCompletionUpdate update = null;
+            int? toolCalls = null;
+            bool isReasoning = false;
+            List<ChatResponseUpdate> updates = [];
             using var streamingRender = host.NewStreamRender(token);
 
             try
             {
                 do
                 {
-                    update = response.Current;
-                    if (update.ContentUpdate.Count > 0)
+                    if (toolCalls is 0)
                     {
-                        streamingRender.Refresh(update.ContentUpdate[0].Text);
+                        toolCalls = null;
+                    }
+
+                    ChatResponseUpdate update = response.Current;
+                    updates.Add(update);
+
+                    foreach (AIContent content in update.Contents)
+                    {
+                        if (content is TextReasoningContent reason)
+                        {
+                            if (isReasoning)
+                            {
+                                streamingRender.Refresh(reason.Text);
+                            }
+                            else
+                            {
+                                isReasoning = true;
+                                streamingRender.Refresh($"<Thinking>\n{reason.Text}");
+                            }
+
+                            continue;
+                        }
+
+                        string message = content switch
+                        {
+                            TextContent text => text.Text ?? string.Empty,
+                            ErrorContent error => error.Message ?? string.Empty,
+                            _ => null
+                        };
+
+                        if (message is null)
+                        {
+                            toolCalls = content switch
+                            {
+                                FunctionCallContent => (toolCalls + 1) ?? 1,
+                                FunctionResultContent => toolCalls - 1,
+                                _ => toolCalls
+                            };
+                        }
+
+                        if (isReasoning)
+                        {
+                            isReasoning = false;
+                            message = $"\n</Thinking>\n\n{message}";
+                        }
+
+                        if (!string.IsNullOrEmpty(message))
+                        {
+                            streamingRender.Refresh(message);
+                        }
                     }
                 }
-                while (await response.MoveNextAsync().ConfigureAwait(continueOnCapturedContext: false));
+                while (toolCalls is 0
+                    ? await host.RunWithSpinnerAsync(() => response.MoveNextAsync().AsTask()).ConfigureAwait(false)
+                    : await response.MoveNextAsync().ConfigureAwait(false));
             }
             catch (OperationCanceledException)
             {
-                update = null;
+                // Ignore cancellation exception.
             }
 
-            if (update is null)
-            {
-                _chatService.CalibrateChatHistory(usage: null, response: null);
-            }
-            else
-            {
-                string responseContent = streamingRender.AccumulatedContent;
-                _chatService.CalibrateChatHistory(update.Usage, new AssistantChatMessage(responseContent));
-            }
+            _chatService.ChatHistory.AddMessages(updates);
         }
 
         return checkPass;
@@ -308,6 +351,22 @@ public sealed class OpenAIAgent : ILLMAgent
                 "ModelName": "gpt-4o",
                 "Key": "<insert your key>",
                 "SystemPrompt": "1. You are a helpful and friendly assistant with expertise in PowerShell scripting and command line.\n2. Assume user is using the operating system `Windows 11` unless otherwise specified.\n3. Use the `code block` syntax in markdown to encapsulate any part in responses that is code, YAML, JSON or XML, but not table.\n4. When encapsulating command line code, use '```powershell' if it's PowerShell command; use '```sh' if it's non-PowerShell CLI command.\n5. When generating CLI commands, never ever break a command into multiple lines. Instead, always list all parameters and arguments of the command on the same line.\n6. Please keep the response concise but to the point. Do not overexplain."
+              },
+
+              // To use Azure OpenAI service with Entra ID authentication:
+              // - Set `Endpoint` to the endpoint of your Azure OpenAI service.
+              // - Set `Deployment` to the deployment name of your Azure OpenAI service.
+              // - Set `ModelName` to the name of the model used for your deployment, e.g. "gpt-4o".
+              // - Set `AuthType` to "EntraID" to use Azure AD credentials.
+              // For example:
+              {
+                "Name": "ps-az-entraId",
+                "Description": "A GPT instance with expertise in PowerShell scripting using Entra ID authentication.",
+                "Endpoint": "<insert your Azure OpenAI endpoint>",
+                "Deployment": "<insert your deployment name>",
+                "ModelName": "gpt-4o",
+                "AuthType": "EntraID",
+                "SystemPrompt": "You are a helpful and friendly assistant with expertise in PowerShell scripting and command line."
               }
               */
           ],

@@ -19,6 +19,11 @@ $Script:WinInstallationLocation = "$env:LOCALAPPDATA\Programs\AIShell"
 $Script:InstallLocation = $null
 $Script:PackageURL = $null
 $Script:ModuleVersion = $null
+$Script:NewPSRLInstalled = $false
+$Script:PSRLDependencyMap = @{
+    '1.0.4-preview4' = '2.4.2-beta2'
+    '1.0.6-preview6' = '2.4.3-beta3'
+}
 
 function Resolve-Environment {
     if ($PSVersionTable.PSVersion -lt [version]"7.4.6") {
@@ -95,6 +100,7 @@ function Install-AIShellApp {
 
     if (-not $destinationExists) {
         # Create the directory if not existing.
+        Write-Host "Creating the target folder '$destination' ..."
         if ($IsWindows) {
             $null = New-Item -Path $destination -ItemType Directory -Force
         } else {
@@ -204,14 +210,43 @@ function Uninstall-AIShellApp {
 }
 
 function Install-AIShellModule {
-    if ($IsWindows) {
-        $modVersion = $Script:ModuleVersion
-        Write-Host "Installing the PowerShell module 'AIShell' $modVersion ..."
-        Install-PSResource -Name AIShell -Repository PSGallery -Prerelease -TrustRepository -Version $modVersion -ErrorAction Stop -WarningAction SilentlyContinue
-    } else {
-        Write-Host -ForegroundColor Yellow "Currently the AIShell PowerShell module will only work in iTerm2 terminal and still has limited support but if you would like to test it, you can install it with 'Install-PSResource -Name AIShell -Repository PSGallery -Prerelease'."
-        Write-Host -ForegroundColor Yellow "The AI Shell app has been added to your path, please run 'aish' to use the standalone experience."
+    $modVersion = $Script:ModuleVersion
+    Write-Host "Installing the PowerShell module 'AIShell' $modVersion ..."
+    Install-PSResource -Name AIShell -Repository PSGallery -Prerelease -TrustRepository -Version $modVersion -ErrorAction Stop -WarningAction SilentlyContinue
+
+    $psrldep = GetPSRLDependency -modVersion $modVersion
+
+    if ($psrldep) {
+        $psrlModule = Get-Module -Name PSReadLine
+        $psrlVer = $psrldep.Contains('-') ? $psrldep.Split('-')[0] : $psrldep
+        if ($null -eq $psrlModule -or $psrlModule.Version -lt [version]$psrlVer) {
+            Write-Host "  - This version of AIShell module depends on PSReadLine '$psrldep' or higher, which is missing."
+            Write-Host "    Installing the PowerShell module 'PSReadLine' $psrldep or a higher version ..."
+            Install-PSResource -Name PSReadLine -Repository PSGallery -Prerelease -TrustRepository -Version "[$psrldep, ]" -ErrorAction Stop -WarningAction SilentlyContinue
+            $Script:NewPSRLInstalled = $true
+        }
     }
+
+    if ($IsMacOS) {
+        Write-Host -ForegroundColor Yellow "NOTE: The 'AIShell' PowerShell module only works in iTerm2 terminal in order to provide the sidecar experience."
+    }
+}
+
+function GetPSRLDependency {
+    param([string] $modVersion)
+
+    $keys = $Script:PSRLDependencyMap.Keys
+    $curVer = [version]($modVersion.Contains('-') ? $modVersion.Split('-')[0] : $modVersion)
+
+    $psrldep = $null
+    foreach ($key in $keys) {
+        $ver = $key.Contains('-') ? $key.Split('-')[0] : $key
+        if ($curVer -ge [version]$ver) {
+            $psrldep = $Script:PSRLDependencyMap[$key]
+        }
+    }
+
+    return $psrldep
 }
 
 function Uninstall-AIShellModule {
@@ -237,12 +272,22 @@ if ($Uninstall) {
     Uninstall-AIShellApp
     Uninstall-AIShellModule
 
-    $message = $IsWindows ? "AI Shell App and PowerShell module have" : "AI Shell App has"
-    Write-Host "`n$message been successfully uninstalled." -ForegroundColor Green
+    Write-Host -ForegroundColor Green "`nAI Shell App and PowerShell module have been successfully uninstalled."
 } else {
     Install-AIShellApp
     Install-AIShellModule
 
-    $message = $IsWindows ? "'Start-AIShell'" : "'aish'"
-    Write-Host "`nInstallation succeeded.`nTo learn more about AI Shell please visit https://aka.ms/AIShell-Docs.`nTo get started please run $message to start AI Shell." -ForegroundColor Green
+    $condition = $IsMacOS ? " if you are in iTerm2" : $null
+    Write-Host -ForegroundColor Green -Object @"
+
+Installation succeeded.
+To learn more about AI Shell please visit https://aka.ms/AIShell-Docs.
+To get started, please run 'Start-AIShell' to use the sidecar experience${condition}, or run 'aish' to use the standalone experience.
+"@
+    if ($Script:NewPSRLInstalled) {
+        Write-Host -ForegroundColor Yellow -Object @"
+NOTE: A new version of the PSReadLine module was installed as a dependency.
+To ensure the new PSReadLine gets used, please run 'Start-AIShell' from a new session.
+"@
+    }
 }
